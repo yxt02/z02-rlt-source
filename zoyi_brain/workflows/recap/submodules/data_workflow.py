@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""Audit and adapt z02 datasets.
+
+Features:
+  - audit data integrity (indices, joints, timestamps, videos)
+  - compute return labels and episode outcomes
+  - generate train/val/test splits
+
+See README.md for input/output contracts.
+"""
+
+import argparse
+from collections import Counter, defaultdict
+import hashlib
+import json
+from pathlib import Path
+import random
+import shutil
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# Before numpy/cv2: submodules sets single-threaded BLAS, which this environment
+# needs for the heavy imports below not to crash. See README.md.
+import submodules  # noqa: F401
+
+import cv2
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+from omegaconf import OmegaConf
+
+from submodules.contracts import episode_returns, resolve_outcome, resolve_path
+
+# Tunable parameters. Command line flags override these; relative paths resolve
+# against PROJECT_ROOT.
+DEFAULT_CONFIG = "config/z02_data.yaml"
+
+# z02 joint layout: 7 left arm + left hand + 7 right arm + right hand + 4 body + 2 head.
+JOINT_NAMES = (
+    [f"left_arm_{i}" for i in range(7)]
+    + ["left_hand_binary"]
+    + [f"right_arm_{i}" for i in range(7)]
+    + ["right_hand_binary"]
+    + [f"body_source_{i}" for i in range(4)]
+    + ["head_source_18", "head_source_19"]
+)
+
+
+def save_json(path, value):
+    """Back up differing metadata once, then write atomically."""
+    path = Path(path)
+    content = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+    if path.exists():
+        if path.read_text() == content:
+            return
+        backup = path.with_name(path.name + ".before_z02_v2")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(content)
+    temp.replace(path)
+
+
+def audit_dataset(cfg, spec, verify_videos=False):
+    """Check one dataset: indices, joints, timestamps, returns and videos."""
+    root = resolve_path(cfg["data_dir"]) / spec["name"]
+    files = sorted((root / "data").rglob("episode_*.parquet"))
+    if not files:
+        raise FileNotFoundError(root)
+    info = json.loads((root / "meta/info.json").read_text())
+    obs_dim = info["features"]["observation.joint_positions"]["shape"][0]
+    action_dim = info["features"]["action.joint_positions"]["shape"][0]
+    expected = spec.get("expected_joint_dim") or obs_dim
+    if obs_dim != action_dim or obs_dim != expected:
+        raise ValueError(f"{root}: state/action metadata dimension mismatch")
+    spec["expected_joint_dim"] = expected
+    if spec.get("joint_indices") is None:
+        spec["joint_indices"] = list(range(expected))
+    tasks = {
+        e["task_index"]: e["task"].strip()
+        for e in map(json.loads, (root / "meta/tasks.jsonl").read_text().splitlines())
+    }
+    episodes, tables, videos, schema_names = [], [], [], set()
+    for p in files:
+        table = pq.read_table(p)
+        schema_names.update(table.column_names)
+        d = table.to_pandas()
+        n = len(d)
+        if not n or d.episode_index.nunique() != 1 or not np.array_equal(d.frame_index, np.arange(n)):
+            raise ValueError(f"Invalid episode/frame indices: {p}")
+        ep = int(d.episode_index.iloc[0])
+        if n > cfg["max_episode_steps"]:
+            raise ValueError(f"{p}: {n} exceeds fixed task horizon; create a new return contract")
+        for key in ["observation.joint_positions", "action.joint_positions"]:
+            a = np.stack(d[key])
+            if a.shape != (n, spec["expected_joint_dim"]) or not np.isfinite(a).all():
+                raise ValueError(f"{p}: invalid {key} shape/values: {a.shape}")
+            if expected >= 16 and not np.isin(a[:, [7, 15]], [0.0, 1.0]).all():
+                raise ValueError(f"{p}: hand binary channels invalid")
+        if not np.allclose(d.timestamp, np.arange(n) / info["fps"], atol=1e-4):
+            raise ValueError(f"{p}: timestamp/frame alignment mismatch")
+        if "intervention" in d and not d.intervention.isin([0, 1]).all():
+            raise ValueError(f"{p}: invalid intervention flags")
+        success = resolve_outcome(d, override=spec.get("outcome_override"))
+        raw_terminal = float(d.reward.iloc[-1]) if "reward" in d else None
+        record = dict(
+            dataset=spec["name"],
+            episode_index=ep,
+            episode_file=p.name,
+            total_frames=n,
+            is_success=success,
+            raw_terminal_reward=raw_terminal,
+            intervention_ratio=float(d.intervention.mean()) if "intervention" in d else 0.0,
+            joint_dim=spec["expected_joint_dim"],
+            excluded=n < cfg["min_episode_steps"],
+        )
+        episodes.append(record)
+        ret, rew = episode_returns(n, success, cfg["gamma"], cfg["failure_reward"])
+        if np.min(ret) < -cfg["return_scale"]:
+            raise ValueError("Return outside shared support")
+        prompts = [tasks[int(t)] for t in d.task_index]
+        tables.append(
+            pa.table(
+                {
+                    "episode_index": d.episode_index.to_numpy(),
+                    "frame_index": d.frame_index.to_numpy(),
+                    "return": ret,
+                    "reward": rew,
+                    "prompt": prompts,
+                }
+            )
+        )
+        for cam in cfg["cameras"]:
+            vp = root / info["video_path"].format(
+                episode_chunk=ep // info["chunks_size"], episode_index=ep, video_key=f"observation.images.{cam}"
+            )
+            if not vp.is_file():
+                raise FileNotFoundError(vp)
+            if verify_videos:
+                cap = cv2.VideoCapture(str(vp))
+                try:
+                    count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    if count != n or abs(fps - info["fps"]) > 0.05:
+                        raise ValueError(f'{vp}: video frames/fps {count}/{fps} != {n}/{info["fps"]}')
+                    for pos in sorted({0, n // 2, n - 1}):
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+                        ok, image = cap.read()
+                        if not ok or image is None:
+                            raise ValueError(f"{vp}: cannot decode frame {pos}")
+                finally:
+                    cap.release()
+            videos.append(str(vp.relative_to(root)))
+    if len({e["episode_index"] for e in episodes}) != len(episodes):
+        raise ValueError(f"Duplicate episode ids in {root}")
+    return root, info, tasks, episodes, pa.concat_tables(tables), videos, schema_names
+
+
+def write_dataset(cfg, spec, audited):
+    """Write the return sidecar, its contract and the adaptation metadata."""
+    root, info, tasks, episodes, table, videos, schema = audited
+    # Sidecars are versioned separately from the original rewards and z0 labels.
+    out = root / "meta" / f'returns_{cfg["tag"]}.parquet'
+    temp = out.with_suffix(".parquet.tmp")
+    pq.write_table(table, temp)
+    temp.replace(out)
+    contract = {k: cfg[k] for k in ("tag", "gamma", "failure_reward", "return_scale", "max_episode_steps")}
+    contract.update(
+        task=list(tasks.values()),
+        normalization="raw_return / return_scale",
+        outcome_override=spec.get("outcome_override"),
+        outcome_source=spec.get("outcome_source", "raw terminal reward"),
+        sidecar_sha256=hashlib.sha256(out.read_bytes()).hexdigest(),
+    )
+    save_json(out.with_suffix(".json"), contract)
+    save_json(
+        root / "meta/episode_outcomes.json",
+        {
+            str(e["episode_index"]): {
+                "is_success": e["is_success"],
+                "raw_terminal_reward": e["raw_terminal_reward"],
+                "source": spec.get("outcome_source", "raw terminal reward"),
+            }
+            for e in episodes
+        },
+    )
+    save_json(
+        root / "meta/z02_adaptation.json",
+        {
+            "raw_joint_dim": spec["expected_joint_dim"],
+            "joint_indices": spec["joint_indices"],
+            "target_joint_names": list(
+                info["features"]["observation.joint_positions"].get("names")
+                or [f"joint_{i}" for i in range(spec["expected_joint_dim"])]
+            ),
+            "raw_arrays_modified": False,
+            "extra_dimensions": "Raw tail retained; explicit model selection only",
+            "excluded_episodes": [e["episode_index"] for e in episodes if e["excluded"]],
+        },
+    )
+    # Metadata describes raw storage, not the padded/model-selected array.
+    features = {k: v for k, v in info["features"].items() if k in schema or v["dtype"] == "video"}
+    for key in ["observation.joint_positions", "action.joint_positions"]:
+        dim = spec["expected_joint_dim"]
+        features[key]["shape"] = [dim]
+        names = features[key].get("names")
+        if not isinstance(names, list) or len(names) != dim:
+            features[key]["names"] = [f"joint_{i}" for i in range(dim)]
+    info.update(
+        robot_type="z02",
+        features=features,
+        total_episodes=len(episodes),
+        total_frames=sum(e["total_frames"] for e in episodes),
+        total_videos=len(videos),
+    )
+    save_json(root / "meta/info.json", info)
+
+
+def split_episodes(cfg, episodes):
+    """Stratify episodes by (dataset, outcome) into train/val/test, reusing existing splits."""
+    output = resolve_path(cfg["output_dir"])
+    eligible = {(e["dataset"], e["episode_index"]): e for e in episodes if not e["excluded"]}
+    splits = {s: [] for s in ("train", "val", "test")}
+    assigned = set()
+    if cfg.get("preserve_existing_splits", True):
+        for s in splits:
+            p = output / f"{s}.json"
+            if p.exists():
+                for old in json.loads(p.read_text())["episodes"]:
+                    key = (old["dataset"], old["episode_index"])
+                    if key in assigned:
+                        raise ValueError(f"Split overlap: {key}")
+                    if key in eligible:
+                        splits[s].append(eligible[key])
+                        assigned.add(key)
+    rng = random.Random(cfg["random_seed"])
+    groups = defaultdict(list)
+    for key, e in eligible.items():
+        if key not in assigned:
+            groups[(e["dataset"], e["is_success"])].append(e)
+    for key in sorted(groups):
+        group = groups[key]
+        rng.shuffle(group)
+        nt = int(len(group) * cfg["train_ratio"])
+        nv = int(len(group) * cfg["val_ratio"])
+        for s, part in zip(splits, (group[:nt], group[nt : nt + nv], group[nt + nv :])):
+            splits[s].extend(part)
+    summary = {}
+    for s, entries in splits.items():
+        entries.sort(key=lambda e: (e["dataset"], e["episode_index"]))
+        counts = dict(
+            total_episodes=len(entries),
+            total_frames=sum(e["total_frames"] for e in entries),
+            success_episodes=sum(e["is_success"] for e in entries),
+            failure_episodes=sum(not e["is_success"] for e in entries),
+        )
+        save_json(output / f"{s}.json", dict(split_name=s, **counts, episodes=entries))
+        summary[s] = counts
+        p = output / "lerobot" / f"{s}_episodes.txt"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join(f'{e["dataset"]}/{e["episode_file"]}\n' for e in entries))
+    save_json(output / "summary.json", summary)
+    save_json(
+        output / "excluded.json",
+        {
+            "episodes": [e for e in episodes if e["excluded"]],
+            "reason": "Fewer than min_episode_steps; retained in raw storage",
+        },
+    )
+    return summary
+
+
+def run(config_path, write=False, split=False, verify_videos=False):
+    """Audit every configured dataset, optionally writing returns and splits."""
+    cfg = OmegaConf.to_container(OmegaConf.load(resolve_path(config_path)), resolve=True)
+    if abs(sum(cfg[k] for k in ("train_ratio", "val_ratio", "test_ratio")) - 1) > 1e-8:
+        raise ValueError("Split ratios must sum to one")
+    if (
+        cfg["failure_reward"] > -cfg["max_episode_steps"]
+        or cfg["return_scale"] < abs(cfg["failure_reward"]) + cfg["max_episode_steps"] - 1
+    ):
+        raise ValueError("Task contract must separate failures and cover the full return range")
+    task_texts = set()
+    for spec in cfg["datasets"]:
+        task_file = resolve_path(cfg["data_dir"]) / spec["name"] / "meta/tasks.jsonl"
+        task_texts.update(json.loads(line)["task"].strip() for line in task_file.read_text().splitlines())
+    if len(task_texts) != 1:
+        raise ValueError("This shared contract covers one task; use separate contracts for different tasks")
+    episodes, reports = [], {}
+    for spec in cfg["datasets"]:
+        audited = audit_dataset(cfg, spec, verify_videos)
+        root, info, tasks, eps, table, videos, schema = audited
+        episodes.extend(eps)
+        if write:
+            write_dataset(cfg, spec, audited)
+        reports[spec["name"]] = dict(
+            episodes=len(eps),
+            frames=sum(e["total_frames"] for e in eps),
+            successes=sum(e["is_success"] for e in eps),
+            failures=sum(not e["is_success"] for e in eps),
+            raw_terminal_rewards=dict(Counter(str(e["raw_terminal_reward"]) for e in eps)),
+            raw_joint_dim=spec["expected_joint_dim"],
+            videos=len(videos),
+            video_check="count/fps + first/middle/last decode" if verify_videos else "existence",
+        )
+        print(spec["name"], reports[spec["name"]], flush=True)
+    summary = split_episodes(cfg, episodes) if split else None
+    if write or split:
+        output = resolve_path(cfg["output_dir"])
+        previous = output / "summary.json"
+        save_json(
+            output / "adaptation_report.json",
+            dict(
+                datasets=reports,
+                splits=summary
+                if summary is not None
+                else (json.loads(previous.read_text()) if previous.exists() else None),
+                config=cfg,
+            ),
+        )
+    if summary:
+        print(json.dumps(summary, indent=2))
+    return reports
+
+
+def main_prepare(argv=None):
+    """CLI for `data prepare`: audit, compute returns and split the configured datasets."""
+    p = argparse.ArgumentParser(description="审计和适配 z02 数据集")
+    p.add_argument("--config", default=DEFAULT_CONFIG, help="数据配置文件路径")
+    p.add_argument("--all", action="store_true", help="执行所有操作（审计 + 回报 + 划分）")
+    p.add_argument("--analyze", action="store_true", help="只读检查数据完整性")
+    p.add_argument("--compute_returns", action="store_true", help="计算并写入回报标签")
+    p.add_argument("--split_data", action="store_true", help="生成训练/验证/测试集划分")
+    p.add_argument("--verify-videos", action="store_true", help="验证视频帧数、帧率和解码")
+    args = p.parse_args(argv)
+    if any([args.all, args.analyze, args.compute_returns, args.split_data, args.verify_videos]):
+        run(args.config, args.all or args.compute_returns, args.all or args.split_data, args.verify_videos)
+    else:
+        p.print_help()
+
+
+def main(argv=None):
+    """Route to the prepare subcommand."""
+    argv = sys.argv[1:] if argv is None else argv
+    main_prepare(argv)
+
+
+if __name__ == "__main__":
+    main()

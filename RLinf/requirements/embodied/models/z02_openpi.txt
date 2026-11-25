@@ -1,0 +1,15 @@
+-r openpi.txt
+
+rlinf-openpi==0.1.1
+transformers==4.53.2
+tokenizers==0.21.4
+torchcodec==0.11.1
+torchdata==0.11.0
+setuptools>=69.5.1,<75.9
+
+# Keep the LeRobot v2.1 reader on the OpenPI-compatible NumPy 1.x stack.
+numpy==1.26.4
+datasets==3.6.0
+pyarrow==25.0.1
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86

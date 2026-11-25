@@ -1,0 +1,216 @@
+SO101 配置与控制
+================
+
+本文介绍如何配置 SO101 机械臂，并运行 RLinf 硬件测试脚本，读取反馈、检查关节运动与夹爪开合。
+
+.. figure:: https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/SO101_Follower.webp
+   :align: center
+   :width: 70%
+
+   SO-101 follower 及其夹爪。图片来源：Hugging Face LeRobot。
+
+概览
+----
+
+本文介绍连接机械臂的 Linux 主机上的完整基础流程：硬件检查、使用 leader 采集示范数据、SFT 训练，以及本地 fixed-checkpoint 推理。
+
+硬件配置
+--------
+
+安装软件前，先准备机械臂及其控制主机。
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - 组件
+     - 要求
+   * - Follower
+     - SO-101 机械臂及其夹爪、舵机控制板和套件指定的电源。
+   * - 控制主机
+     - 通过 USB 连接 follower 舵机控制板的 Linux 计算机。
+
+未组装的机械臂请先参考 `LeRobot SO-101 指南 <https://huggingface.co/docs/lerobot/so101>`_ 中的零件清单与组装说明。完成接线前，需要逐个配置新电机；下方安装流程包含相应命令。
+
+安装
+----
+
+在控制主机上按下方自定义环境流程安装机器人依赖。后续检查均在同一仓库目录和已激活的环境中运行。
+
+机器人控制节点
+~~~~~~~~~~~~~~
+
+在连接机器人的主机上克隆 RLinf，然后安装对应环境。
+
+.. include:: _setup_common.rst
+   :end-before: 然后，使用
+
+在仓库根目录安装机器人依赖：
+
+.. code-block:: bash
+
+   # Mainland China users can add --use-mirror for faster downloads.
+   bash requirements/install.sh embodied --model openpi --env so101
+   source .venv/bin/activate
+   export REPO_PATH="$PWD"
+
+安装脚本包含 OpenPI、LeRobot 及 Feetech 电机依赖。后续命令均在此仓库目录中运行，并保持环境已激活。平台要求见 :doc:`安装 </rst_source/start/installation>`。
+
+查找串口并配置电机
+^^^^^^^^^^^^^^^^^^
+
+连接舵机控制板的 USB 线缆，以及套件指定的电源。先查找 follower 对应的串口：
+
+.. code-block:: bash
+
+   lerobot-find-port
+
+按提示拔下 USB 线缆，再重新接入。工具报告的设备路径就是后续使用的串口；以下示例假设为 ``/dev/ttyACM0``。检查设备权限和当前用户组：
+
+.. code-block:: bash
+
+   ls -l /dev/ttyACM0
+   id -nG
+
+在 Ubuntu 上，如果串口属于 ``dialout`` 组，运行程序的账号也需要加入该组。若尚未加入，执行 ``sudo usermod -aG dialout "$USER"``，退出登录并重新登录，然后回到仓库目录，重新激活 ``.venv``。USB 重新接入后，应再次确认串口路径。
+
+新电机或更换后的电机需要按上游指南的接线顺序，逐个设置 ID 与波特率；此步骤通常只需执行一次：
+
+.. code-block:: bash
+
+   lerobot-setup-motors \
+     --robot.type=so101_follower \
+     --robot.port=/dev/ttyACM0
+
+每次仅将提示中指定的电机连接到控制板。工具设置该电机的 ID 和波特率后，才会提示连接下一个。6 个电机全部配置完成后，按指南完成组装并恢复串联接线。已配置好的机械臂可跳过电机配置，但仍需使用 RLinf 将采用的 ID 完成标定。
+
+标定 Follower
+^^^^^^^^^^^^^
+
+电机配置与组装完成后，在终端中标定 follower，再让 RLinf 打开串行总线：
+
+.. code-block:: bash
+
+   lerobot-calibrate \
+     --robot.type=so101_follower \
+     --robot.port=/dev/ttyACM0 \
+     --robot.id=rlinf_follower
+
+将串口替换为实际设备。按照指南将关节移到中间位置并确认提示，再按要求逐个移动关节，覆盖其运动范围。工具会报告保存的标定文件；请保留在运行 RLinf 的账号下，并使用相同的 ``--id rlinf_follower``。follower 不能使用 leader 的标定文件。
+
+.. warning::
+
+   RLinf worker 不会交互式标定 follower。标定缺失或与硬件不一致时，连接会失败。启动 worker 前，先用运行机械臂的账号完成标定。
+
+运行
+----
+
+follower 标定完成后，使用交互式测试检查关节与夹爪。脚本可能启动本机 Ray 实例，用于与机械臂通信。
+
+.. warning::
+
+   在硬件模式下，启动时会通过限速的关节轨迹，将机械臂移至关节角为 ``[0, -99, 95, 65, 0]`` 度的折叠姿态。启动前请清空这条运动路径。添加 ``--no-reset`` 可仅建立连接，不发送启动运动命令。
+
+确认 follower 已标定，且初始折叠动作的路径无遮挡后，运行：
+
+.. code-block:: bash
+
+   CAMERA_SERIALS='' python -m toolkits.realworld_check.test_so101_env \
+     --port /dev/ttyACM0 --id rlinf_follower --step 2
+
+将串口替换为实际设备，ID 使用标定时的值。``CAMERA_SERIALS=''`` 关闭相机发现，使测试只使用机械臂。
+
+启动复位和 ``home`` 命令均从实测关节位置生成平滑轨迹，默认将目标关节速度限制为每秒 30 度。使用 ``--reset-speed 10`` 可降低复位速度。移动幅度较大时，驱动会延长轨迹时间；写入延迟后也不会连续补发命令。在环境配置中，``reset_joint_speed`` 的单位为弧度每秒，``reset_duration`` 设置轨迹的最短时间，默认为 3 秒。
+
+逐条输入以下指令，每次运动完成后再继续：
+
+.. code-block:: text
+
+   where
+   up
+   down
+   open
+   close
+   quit
+
+``up`` 和 ``down`` 分别将肩关节角度增加或减少 2 度，并非让末端沿竖直方向移动。每次关节运动后会打印反馈；``open`` 与 ``close`` 用于测试夹爪。``quit`` 关闭环境及其机械臂 worker。输入 ``help`` 可查看其他关节方向。
+
+在自己的程序中控制机械臂或接入相机，请参考 :doc:`机器人接口 </rst_source/concepts/robotics>`。
+
+使用 Leader 控制机械臂
+-----------------------
+
+要通过手动操作控制 follower，请连接 SO101 leader，并使用它自己的端口和 calibration ID 完成校准：
+
+.. code-block:: bash
+
+   lerobot-calibrate \
+     --teleop.type=so101_leader \
+     --teleop.port=/dev/ttyACM1 \
+     --teleop.id=rlinf_leader
+
+为两台机械臂配置端口后启动检查。未设置 ``CAMERA_SERIALS`` 时会自动发现相机；添加 ``--enable-camera-player`` 可显示图像：
+
+.. code-block:: bash
+
+   python -m toolkits.realworld_check.test_so101_env \
+     --port /dev/ttyACM0 --id rlinf_follower \
+     --leader /dev/ttyACM1 --leader-id rlinf_leader \
+     --fps 30 --enable-camera-player
+
+follower 折叠到初始姿态后，将 leader 放到相同姿态，再输入 ``teleop``。follower 会持续跟随关节和夹爪运动。按一次 Ctrl-C 返回命令提示符，再输入 ``quit`` 断开连接。
+
+``--fps`` 设置目标控制频率，默认为 30 Hz。相机独立采集图像；环境会复用不超过 ``camera_max_age`` 秒的图像（默认 0.5 秒），无需每步等待新图像。连续夹爪命令不等待运动完成。驱动会监测夹爪停滞，并将目标保持在实测开度以释放压力。每次检测到夹爪向目标进一步移动时，驱动都会重新开始停滞检测，因此缓慢或持续的运动只要仍在前进就可以继续。需要再次向受阻方向运动时，先将 leader 的夹爪向远离该开度的方向移动。驱动的 ``open_gripper()`` 和 ``close_gripper()`` 方法仍会等待运动完成或压力释放。
+
+采集示范数据
+-------------
+
+两台机械臂通过硬件检查后，在 ``examples/embodiment/config/realworld_so101_collect_data_joint.yaml`` 中填写 follower、leader 的串口、calibration ID、相机设备和 ``task_description``，并核对配置中的 reset 姿态。先替换设备占位符，确认 reset 姿态适合本机硬件，再连接机械臂。将占位文本 ``<task description>`` 替换为示范数据实际使用的 instruction。采集器会让两台机械臂回到配置的起始姿态，记录 leader 示范，并将可供 SO-101 SFT loader 使用的 LeRobot dataset 写入运行目录。
+
+在仓库根目录启动采集：
+
+.. code-block:: bash
+
+   bash examples/embodiment/collect_data.sh \
+     realworld_so101_collect_data_joint
+
+keyboard wrapper 使用 ``a`` 开始或放弃录制，使用 ``b`` 切换 segment，使用 ``c`` 保存成功 episode，使用 ``q`` 安全停止采集。运行账号必须有权读取选定的 Linux input device；如果主机上有多个键盘设备，请将 ``RLINF_KEYBOARD_DEVICE`` 设为稳定的 ``/dev/input/by-id/...`` 路径。
+
+数据会写入本次运行目录下的 ``collected_data``。同一个 LeRobot dataset 根目录可以包含多条 episode，继续向其中采集无需额外整理。不同运行可能产生不同的 dataset 根目录；如果要一起训练，先把这些数据合并成一个 LeRobot dataset，并保留每条 episode 的帧数据和任务描述。然后将合并后直接包含 ``meta/info.json`` 的根目录填入 SFT YAML 的 ``data.train_data_paths``。SFT 读取一个已准备好的 dataset，不会自动合并多次采集的运行目录。norm stats 也必须从这个合并后的 dataset 计算，不能只使用其中一次采集的数据。
+
+SO-101 的 state 和 action 在采集、存储、SFT 与评测中统一使用六维数据格式：前 5 维是绝对关节位置，单位为弧度；第 6 维是夹爪开度，``0`` 表示关闭，``1`` 表示张开。norm stats 也必须从这套表示计算。
+
+SFT 前，使用同一数据集计算 OpenPI 需要的 padded norm stats。生成器会读取每条 LeRobot sample 的 ``task`` 字符串，并将其作为 ``prompt`` 传给 SO-101 OpenPI transforms。进入 RLinf 仓库并激活 embodied 环境后运行：
+
+.. code-block:: bash
+
+   export HF_LEROBOT_HOME=/absolute/path/to/datasets
+   python toolkits/lerobot/calculate_norm_stats.py \
+     --config-name pi05_so101_joint \
+     --repo-id so101_dataset
+
+运行前将 ``HF_LEROBOT_HOME`` 设为包含该 dataset 根目录的父目录。命令会通过 ``Writing stats to:`` 输出实际写入目录；将该目录下生成的 ``norm_stats.json`` 填入 SFT YAML 的 ``actor.model.openpi_data.norm_stats_path``，并在评测模型配置中继续使用同一文件。输出目录由所选 OpenPI training config 决定，可能与 SFT YAML 中的 ``assets_dir`` 不同。文件必须同时包含 ``state`` 和 ``actions`` 两组 stats，且每组为 32 维；SO-101 transforms 会先将 canonical 六维向量 padding 到 Pi0.5 model dimension，再计算 stats。
+
+数采与评测都复用 ``SO101ReachEnv-v1`` 提供 SO-101 的关节空间观测、动作和 reset 生命周期。评测配置中的 ``task_description`` 应与 SFT 使用的 instruction 保持一致，使 fixed checkpoint 收到训练时的任务指令；操作者通过 ``b`` 或 ``c`` 记录评测结果。
+
+本地训练与 fixed-checkpoint 推理
+--------------------------------
+
+RLinf 提供 SO-101 关节空间 SFT 配置和本地 fixed-checkpoint 推理配置。先在 ``examples/sft/config/realworld_sft_openpi_so101.yaml`` 中填写直接包含 ``meta/info.json`` 的 dataset 根目录、基础 checkpoint 和 norm stats 路径，再通过统一 SFT 入口启动训练：
+
+.. code-block:: bash
+
+   bash examples/sft/run_vla_sft.sh realworld_sft_openpi_so101
+
+本地推理前，在 ``examples/embodiment/config/model/so101_pi05.yaml`` 中填写 checkpoint 和 norm stats 路径，并在 ``examples/embodiment/config/realworld_so101_eval_openpi.yaml`` 中填写 follower 串口、calibration ID 和相机设备，核对配置中的 reset 姿态。替换设备占位符并确认 reset 姿态适合本机硬件后，再连接机械臂。将 ``task_description`` 的占位文本 ``<task description>`` 替换为 SFT 使用的相同 instruction，然后通过统一评测入口启动：
+
+.. code-block:: bash
+
+   bash evaluations/run_eval.sh realworld_so101_eval_openpi
+
+评测配置使用 standard action-chunk 评测路径。按选定键盘上的 ``a`` 启动 episode，按 ``c`` 以成功结束，按 ``b`` 以失败结束。checkpoint 必须包含与 ``pi05_so101_joint`` 兼容的权重，以及配置的 asset ID 对应的 norm stats。
+
+新增真机任务
+------------
+
+如果要围绕这台机械臂构建其他 RLinf environment，请参考 :doc:`新增真机任务 </rst_source/extending/new_task>`，定义对应的 reset 流程、观测、动作、奖励和成功条件。上面的采集、SFT 与 fixed-checkpoint 评测流程已经使用 RLinf 提供的 ``SO101ReachEnv-v1`` task；只有新增其他 task 或 environment 时才需要参考这份扩展指南。

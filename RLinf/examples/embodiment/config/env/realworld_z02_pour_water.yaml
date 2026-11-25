@@ -1,0 +1,35 @@
+env_type: real
+total_num_envs: 1
+rollout_epoch: 1
+auto_reset: true
+ignore_terminations: false
+ros1_setup: false
+reward_mode: raw
+wrap_obs_mode: simple
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: false
+max_steps_per_rollout_epoch: 600
+max_episode_steps: 1800
+teleop: none
+keyboard_reward_wrapper: null
+main_image_key: head
+
+video_cfg:
+  save_video: false
+  info_on_video: true
+  video_base_dir: ${runner.logger.log_path}/video
+
+init_params:
+  id: Z02PourWaterEnv-v1
+  num_envs: null
+
+override_cfg:
+  bridge_url: ${oc.env:Z02_RLT_BRIDGE_URL}
+  task_description: ${oc.env:Z02_RLT_PROMPT}
+  request_timeout: 3.0
+  reset_timeout: 310.0
+  image_width: 320
+  image_height: 180
+  episode_step_limit: 1800
+  manual_episode_control_only: true

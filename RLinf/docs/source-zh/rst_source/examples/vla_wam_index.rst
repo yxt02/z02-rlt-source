@@ -1,0 +1,201 @@
+具身模型
+========
+
+按模型或 policy 类型查找安装、checkpoint 和强化学习训练流程。若从基准出发选择示例，请参阅 :doc:`simulators_index`。
+
+.. _model-hardware-support:
+
+硬件支持
+------------
+
+模型示例默认使用 NVIDIA CUDA。AMD ROCm、华为昇腾 CANN、摩尔线程 MUSA、Intel XPU、昆仑芯 XPU、沐曦 MACA 和壁仞 SUPA 也支持下列模型与环境组合。点击模型或硬件链接查看训练示例及已提供的硬件配置说明。非 CUDA 后端上，ManiSkill 用 CPU 运行 PhysX，渲染后端单独配置。
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 38 40
+
+   * - 模型
+     - 硬件
+     - 环境与范围
+   * - :doc:`OpenVLA <embodied/maniskill>`
+     - AMD ROCm · 华为昇腾 CANN · 摩尔线程 MUSA · 沐曦 MACA
+     - ManiSkill
+   * - :doc:`OpenVLA-OFT <embodied/openvla_oft>`
+     - :ref:`AMD ROCm · 华为昇腾 CANN · 摩尔线程 MUSA <openvla-oft-hardware>` · 昆仑芯 XPU
+     - LIBERO · ManiSkill（AMD、昇腾、MUSA）· :ref:`RoboTwin（ROCm） <robotwin-hardware>` · :ref:`Wan 世界模型 <wan-hardware>`\ （昇腾、MUSA、ROCm、昆仑芯）
+   * - :doc:`GR00T N1.5 / N1.7 <embodied/gr00t>`
+     - :ref:`AMD ROCm · 华为昇腾 CANN · 摩尔线程 MUSA <gr00t-hardware>` · Intel XPU
+     - N1.5：LIBERO · ManiSkill（全部四种后端）· N1.7：LIBERO · ManiSkill（Intel XPU）；ManiSkill 需要带有 ``maniskill_widowx`` head 的 checkpoint
+   * - :doc:`π₀ / π₀.₅ (OpenPI) <embodied/pi0>`
+     - :ref:`AMD ROCm · 华为昇腾 CANN · 摩尔线程 MUSA <pi0-hardware>` · Intel XPU · 昆仑芯 XPU · 沐曦 MACA · 壁仞 SUPA
+     - LIBERO（AMD、昇腾、MUSA、Intel、昆仑芯、沐曦）· ManiSkill（AMD、昇腾、MUSA、Intel）· :ref:`RoboTwin（ROCm） <robotwin-hardware>` · :doc:`SFT <embodied/sft_openpi>`\ （壁仞 SUPA）
+   * - :doc:`LingbotVLA 1.0 <embodied/lingbotvla>`
+     - :ref:`AMD ROCm <robotwin-hardware>`
+     - :ref:`RoboTwin <robotwin-hardware>`
+   * - :doc:`StarVLA (QwenOFT) <embodied/starvla>`
+     - :ref:`华为昇腾 CANN <starvla-hardware>`
+     - LIBERO
+   * - :doc:`DreamZero <embodied/sft_dreamzero>`
+     - :ref:`华为昇腾 CANN <sft-dreamzero-hardware>`
+     - SFT（LeRobot 数据集）
+
+模型示例
+--------
+
+选择模型页面，查看完整流程及其支持的环境。
+
+.. raw:: html
+
+   <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: flex-start; justify-items: center; max-width: 980px; margin: 0 auto;">
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/openvla_oft.html" style="display: block;"><img src="https://openvla-oft.github.io/static/images/libero_task_performance_results.png"
+            style="width: 100%; height: 200px; object-fit: contain; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/openvla_oft.html" style="text-decoration: underline; color: blue;">
+           <b>OpenVLA-OFT</b>
+         </a><br>
+         在 NVIDIA CUDA、AMD ROCm、华为昇腾 CANN 和摩尔线程 MUSA 上运行 LIBERO 训练
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/mlp.html" style="display: block;"><img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/3_layer_mlp.jpg"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/mlp.html" style="text-decoration: underline; color: blue;">
+           <b>MLP 策略强化学习</b>
+         </a><br>
+         使用 PPO、SAC 或 GRPO 在多种仿真环境中训练轻量级 MLP 策略
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/pi0_fast.html" style="display: block;"><img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/pi0_icon.jpg"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/pi0_fast.html" style="text-decoration: underline; color: blue;">
+           <b>π₀-FAST 强化学习训练</b>
+         </a><br>
+         LeRobot π₀-FAST + LIBERO-Long + token-level GRPO
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/pi0.html" style="display: block;"><img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/pi0_icon.jpg"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/pi0.html" style="text-decoration: underline; color: blue;">
+           <b>π₀和π₀.₅模型强化学习训练</b>
+         </a><br>
+         在π₀和π₀.₅上实现强化学习的效果跃升
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/gr00t.html" style="display: block;"><img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/gr00t.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/gr00t.html" style="text-decoration: underline; color: blue;">
+           <b>GR00T模型强化学习训练</b>
+         </a><br>
+         支持GR00T-N1.5，N1.6与N1.7强化学习微调
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/dexbotic.html" style="display: block;"><img src="https://raw.githubusercontent.com/dexmal/dexbotic/main/resources/intro.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/dexbotic.html" style="text-decoration: underline; color: blue;">
+           <b>基于 Dexbotic 模型的强化学习训练</b>
+         </a><br>
+         Dexbotic（基于 π₀.₅）+ LIBERO + PPO 训练
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/starvla.html" style="display: block;"><img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/starvla.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/starvla.html" style="text-decoration: underline; color: blue;">
+           <b>StarVLA 模型强化学习训练</b>
+         </a><br>
+         StarVLA + LIBERO + GRPO 具身强化学习训练
+       </p>
+     </div>
+
+     <!-- TODO: swap for a 3:2 pic/molmoact2.png in RLinf/misc once available. -->
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/molmoact2.html" style="display: block;"><img src="https://raw.githubusercontent.com/allenai/molmoact2/main/assets/MolmoAct2.svg"
+            style="width: 100%; height: 200px; object-fit: contain; background: #ffffff; padding: 24px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/molmoact2.html" style="text-decoration: underline; color: blue;">
+           <b>MolmoAct2 模型评测</b>
+         </a><br>
+         在 LIBERO 上评测官方 MolmoAct2-LIBERO checkpoint
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/lingbotvla_index.html" style="display: block;"><img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/lingbotvla.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/lingbotvla_index.html" style="text-decoration: underline; color: blue;">
+           <b>基于 LingbotVLA 模型的强化学习</b>
+         </a><br>
+         支持 LingbotVLA 1.0（GRPO）与 2.0（PPO）+ RoboTwin 训练
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/evo1.html" style="display: block;"><img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/evo1.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/evo1.html" style="text-decoration: underline; color: blue;">
+           <b>Evo-1 模型强化学习训练</b>
+         </a><br>
+         使用 Evo-1 视觉语言动作模型进行具身强化学习训练
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/abot_m0.html" style="display: block;"><img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/ABot-M0.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/abot_m0.html" style="text-decoration: underline; color: blue;">
+           <b>ABot-M0 模型强化学习训练</b>
+         </a><br>
+         ABot-M0 原生集成与 LIBERO-plus PPO 训练
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <a href="embodied/psi0.html" style="display: block;"><img src="https://raw.githubusercontent.com/physical-superintelligence-lab/Psi0/a32e57a3fabb8590c80677f9cd3d1fc3db60eb06/assets/media/arch.png" alt="Psi0 model architecture"
+            style="width: 100%; height: 200px; object-fit: contain; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" /></a>
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/psi0.html" style="text-decoration: underline; color: blue;">
+           <b>Psi0 模型强化学习训练</b>
+         </a><br>
+         Psi0 + SIMPLE + PPO 人形机器人强化学习训练
+       </p>
+     </div>
+
+   </div>
+
+.. toctree::
+   :hidden:
+   :maxdepth: 2
+
+   OpenVLA-OFT <embodied/openvla_oft>
+   MLP <embodied/mlp>
+   π₀ / π₀.₅ <embodied/pi0>
+   π₀-FAST <embodied/pi0_fast>
+   GR00T <embodied/gr00t>
+   Dexbotic <embodied/dexbotic>
+   StarVLA <embodied/starvla>
+   MolmoAct2 <embodied/molmoact2>
+   LingbotVLA <embodied/lingbotvla_index>
+   Evo-1 <embodied/evo1>
+   ABot-M0 <embodied/abot_m0>
+   Psi0 <embodied/psi0>

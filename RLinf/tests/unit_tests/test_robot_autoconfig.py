@@ -1,0 +1,106 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Cluster-level tests for environment-driven robot auto-configuration.
+
+Each scenario runs in a fresh process because ``Cluster`` is process-wide and
+Ray must inherit the environment before startup.
+"""
+
+import os
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
+_SCENARIO = os.path.join(os.path.dirname(__file__), "_robot_autoconfig_cluster.py")
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+_MODES = (
+    # Two robots from comma-separated environment values.
+    "create_multi",
+    # A single robot keeps the whole comma-separated camera list.
+    "create_single",
+    # Explicit YAML values take precedence; omitted values are resolved.
+    "explicit_fill",
+    # GimArm resolves through its own identifier variable.
+    "gim_create",
+    # Serial ports and calibration IDs remain paired on assigned workers.
+    "so101_create",
+    # Shared fields alone do not create a robot.
+    "gating",
+    # The identifier env var has too few values for the configs.
+    "mismatch_low",
+    # The identifier env var has too many values for the configs.
+    "mismatch_high",
+    # The identifier count is fine but a secondary field disagrees.
+    "mismatch_secondary",
+    # Fully specified YAML remains supported for one or more robots.
+    "yaml_single",
+    "yaml_multi",
+    "yaml_dosw1",
+)
+
+
+def _run_scenario(mode: str) -> subprocess.CompletedProcess:
+    """Run a cluster scenario in a subprocess and capture its output."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        path for path in (_REPO_ROOT, env.get("PYTHONPATH")) if path
+    )
+    # Start a private Ray instead of attaching to a running one, which would not
+    # see the scenario's environment.
+    env["RAY_ADDRESS"] = "local"
+    env["RAY_USAGE_STATS_ENABLED"] = "0"
+    return subprocess.run(
+        [sys.executable, _SCENARIO, mode],
+        capture_output=True,
+        text=True,
+        timeout=420,
+        env=env,
+    )
+
+
+def _max_parallel_scenarios() -> int:
+    """Bound concurrent Ray clusters by both CPU cores and physical memory."""
+    cpus = os.cpu_count() or 1
+    try:
+        mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, ValueError, OSError):
+        return min(3, cpus)
+    if mem_bytes <= 0:
+        return min(3, cpus)
+    # Each scenario starts a private Ray cluster with manager and worker actors.
+    return max(1, min(3, cpus, mem_bytes // (10 * 1024**3)))
+
+
+@pytest.fixture(scope="module")
+def scenario_results() -> dict[str, subprocess.CompletedProcess]:
+    """Run isolated scenario subprocesses with bounded concurrency."""
+    workers = _max_parallel_scenarios()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return dict(zip(_MODES, pool.map(_run_scenario, _MODES), strict=True))
+
+
+@pytest.mark.placement
+@pytest.mark.parametrize("mode", _MODES)
+def test_real_cluster_robot_autoconfig(
+    mode: str, scenario_results: dict[str, subprocess.CompletedProcess]
+):
+    result = scenario_results[mode]
+    assert f"{mode}:OK" in result.stdout, (
+        f"scenario {mode} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert result.returncode == 0

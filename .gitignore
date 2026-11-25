@@ -1,0 +1,16 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+.venv-*/
+*.egg-info/
+
+# Logs / outputs
+*.log

@@ -1,0 +1,218 @@
+# Copyright 2025 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import json
+
+import hydra
+import torch.multiprocessing as mp
+from omegaconf.omegaconf import OmegaConf
+
+from rlinf.agents.searchr1.search_tool_worker import SearchToolWorker
+from rlinf.agents.searchr1.searchr1_agent_loop import Searchr1AgentLoopWorker
+from rlinf.config import validate_cfg
+from rlinf.data.datasets.reasoning import create_reasoning_datasets
+from rlinf.models.tokenization.hf import hf_tokenizer
+from rlinf.runners.agent_ppo_runner import AgentPPORunner
+from rlinf.runners.agent_runner import AgentRunner
+from rlinf.runners.async_agent_runner import AsyncAgentRunner
+from rlinf.scheduler import Cluster, NodePlacementStrategy
+from rlinf.utils.placement import ModelParallelComponentPlacement
+from rlinf.utils.utils import output_redirector
+from rlinf.workers.actor.ma_fsdp_actor_worker import MAFSDPActor
+from rlinf.workers.actor.ma_megatron_actor_worker import MAMegatronActor
+from rlinf.workers.agent.tool_worker import ToolWorkerInfo
+from rlinf.workers.critic.ma_megatron_critic_worker import MAMegatronCritic
+from rlinf.workers.inference.utils import get_inference_backend_worker
+from rlinf.workers.rollout.utils import get_rollout_backend_worker
+from rlinf.workers.rollout_buffer.rollout_buffer_worker import RolloutBufferWorker
+
+"""Script to start Search-R1 training"""
+mp.set_start_method("spawn", force=True)
+
+
+def get_ma_actor_worker(cfg):
+    """Select the multi-agent actor worker based on training backend."""
+    if cfg.actor.training_backend == "fsdp":
+        return MAFSDPActor
+    if cfg.actor.training_backend == "megatron":
+        return MAMegatronActor
+    raise ValueError(
+        f"Unsupported training backend for Search-R1 actor: {cfg.actor.training_backend}"
+    )
+
+
+@hydra.main(version_base="1.1")
+@output_redirector
+def main(cfg) -> None:
+    cfg = validate_cfg(cfg)
+    print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
+
+    cluster = Cluster(cluster_cfg=cfg.cluster)
+    component_placement = ModelParallelComponentPlacement(cfg, cluster)
+
+    # Generator group
+    rollout_worker_cls = get_rollout_backend_worker(cfg)
+    rollout_placement_strategy = component_placement.get_strategy("rollout")
+    rollout_group = rollout_worker_cls.create_group(cfg, component_placement).launch(
+        cluster,
+        name=cfg.rollout.group_name,
+        placement_strategy=rollout_placement_strategy,
+    )
+    rollout_placements = rollout_placement_strategy.get_placement(cluster)
+
+    # AgentLoop group.
+    agentloop_placement_strategy = NodePlacementStrategy(
+        [placement.cluster_node_rank for placement in rollout_placements]
+    )
+    assert (
+        len(agentloop_placement_strategy._node_ranks)
+        == component_placement.rollout_num_worker_processes
+    ), "agentloop worker num now should be equal to rollout worker process num"
+    agentloop_group = Searchr1AgentLoopWorker.create_group(
+        cfg, component_placement
+    ).launch(
+        cluster,
+        name=cfg.agentloop.group_name,
+        placement_strategy=agentloop_placement_strategy,
+    )
+
+    # With the session server: one worker group per session server (its
+    # server_index fixes the port), round-robin over the rollout nodes,
+    # plus the single router group on the first rollout node. The payload
+    # channels are created by the runner on each server's node.
+    session_servers = None
+    session_router = None
+    if OmegaConf.select(cfg, "session_server.enable", default=False):
+        # Imported here: the session server worker imports fastapi, uvicorn
+        # and SGLang at module level, which a run without the session server
+        # may not have installed.
+        from rlinf.workers.rollout.session_server.server_worker import (
+            SessionServerWorker,
+        )
+        from rlinf.workers.rollout.sglang.router_worker import SGLangRouterWorker
+
+        rollout_node_ranks = list(
+            dict.fromkeys(
+                placement.cluster_node_rank for placement in rollout_placements
+            )
+        )
+        num_servers = cfg.session_server.num_servers
+        session_servers = [
+            SessionServerWorker.create_group(cfg, server_index).launch(
+                cluster,
+                name=(
+                    cfg.session_server.group_name
+                    if num_servers == 1
+                    else f"{cfg.session_server.group_name}_{server_index}"
+                ),
+                placement_strategy=NodePlacementStrategy(
+                    [rollout_node_ranks[server_index % len(rollout_node_ranks)]]
+                ),
+            )
+            for server_index in range(num_servers)
+        ]
+        session_router = SGLangRouterWorker.create_group(
+            cfg, cfg.rollout.router
+        ).launch(
+            cluster,
+            name="SessionServerRouter",
+            placement_strategy=NodePlacementStrategy([rollout_node_ranks[0]]),
+        )
+
+    # Inference group
+    inference_group = None
+    if component_placement.has_dedicated_actor_inference:
+        inference_placement_strategy = component_placement.get_strategy("inference")
+        inference_worker_cls = get_inference_backend_worker(cfg, "actor")
+        inference_group = inference_worker_cls.create_group(
+            cfg, component_placement
+        ).launch(
+            cluster,
+            name=cfg.inference.group_name,
+            placement_strategy=inference_placement_strategy,
+        )
+
+    # Actor and optional critic groups
+    actor_placement_strategy = component_placement.get_strategy("actor")
+    actor_worker_cls = get_ma_actor_worker(cfg)
+    actor_group = actor_worker_cls.create_group(cfg, component_placement).launch(
+        cluster, name=cfg.actor.group_name, placement_strategy=actor_placement_strategy
+    )
+
+    critic_group = None
+    if cfg.critic.get("use_critic_model", False):
+        critic_group = MAMegatronCritic.create_group(cfg, component_placement).launch(
+            cluster,
+            name=cfg.critic.group_name,
+            placement_strategy=component_placement.get_strategy("critic"),
+        )
+
+    # Dataset
+    tokenizer = hf_tokenizer(cfg.actor.tokenizer.tokenizer_model)
+    train_ds, val_ds = create_reasoning_datasets(cfg, tokenizer)
+
+    # Tool workers group
+    singleton_tool_placement = NodePlacementStrategy([0])
+    tool_workers = {
+        SearchToolWorker.create_group(cfg).launch(
+            cluster, name="search", placement_strategy=singleton_tool_placement
+        ): ToolWorkerInfo(tool_names=["search"], has_session=False),
+    }
+
+    if cfg.runner.get("async_mode", False):
+        runner_cls = AsyncAgentRunner
+    elif critic_group is not None:
+        runner_cls = AgentPPORunner
+    else:
+        runner_cls = AgentRunner
+    rollout_buffer = None
+    if cfg.runner.get("async_mode", False):
+        # The buffer worker owns the dataloader and the admission budget;
+        # one instance on the head node, like the search tool worker.
+        rollout_buffer = RolloutBufferWorker.create_group(cfg, train_ds).launch(
+            cluster,
+            name="RolloutBuffer",
+            placement_strategy=singleton_tool_placement,
+        )
+    runner_kwargs = {
+        "cfg": cfg,
+        "placement": component_placement,
+        "train_dataset": train_ds,
+        "val_dataset": val_ds,
+        "rollout": rollout_group,
+        "inference": inference_group,
+        "actor": actor_group,
+        "reward": None,
+        "agent_loop": agentloop_group,
+        "tool_workers": tool_workers,
+    }
+    if rollout_buffer is not None:
+        # Only AsyncAgentRunner takes the buffer worker that owns the
+        # dataloader and the admission budget.
+        runner_kwargs["rollout_buffer"] = rollout_buffer
+    if critic_group is not None:
+        # AsyncAgentRunner does not take a critic; async and PPO are kept
+        # mutually exclusive by config validation.
+        runner_kwargs["critic"] = critic_group
+    if session_servers is not None:
+        runner_kwargs["session_servers"] = session_servers
+        runner_kwargs["session_router"] = session_router
+    runner = runner_cls(**runner_kwargs)
+
+    runner.init_workers()
+    runner.run()
+
+
+if __name__ == "__main__":
+    main()
